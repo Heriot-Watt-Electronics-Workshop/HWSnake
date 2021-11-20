@@ -1,7 +1,15 @@
-// Code by Will W from Electronics Workshop.
-// Improved upon original source from ANJAWARE.
-// https://www.instructables.com/Arduino-OLED-Snake-Game/
-// 15th November 2021
+// HWSnake game for 1st Year PRAXIS course @
+// Heriot Watt University, Edinburgh. Scotland
+// Build your own Arduino and OLED display shield.
+// Code by Will W from The EPS Electronics Workshop.
+// Version 1.0
+// 20th November 2021
+
+// Feel free to modify and improve the code.
+
+// Dependencies are the SSD1306 library from Adafruit.
+// and 'TimerInterrupt' by Khoi Hoang.
+// These can be installed from 'Tools/Manage Libraries' in the menubar above.
 
 
 #include <Adafruit_GFX.h>
@@ -10,6 +18,7 @@
 // Timer Interrupt for button debounce.
 #define USE_TIMER_1 true
 #include "TimerInterrupt.h"
+#include "assert.h"
 
 // Defined for readability.
 #define YES 1
@@ -32,49 +41,16 @@
   #define DEBUG_PRINTLN_FLASH(x) Serial.println(F(x))
   #define DEBUG_PRINT(x) Serial.print(x)
   #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINT_HEX(x) Serial.print(x, HEX)
+  #define DEBUG_PRINTLN_HEX(x) Serial.println(x, HEX)
 #else
   #define DEBUG_PRINT_FLASH(x)
   #define DEBUG_PRINTLN_FLASH(x)
   #define DEBUG_PRINT(x)
   #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINT_HEX(x)
+  #define DEBUG_PRINTLN_HEX(x)
 #endif // DEBUG
-
-
-// All the directions you need.
-enum class Direction : uint8_t {
-  NONE, UP, DOWN, LEFT, RIGHT
-};
-
-
-// A point.
-struct Point
-#if (DEBUG == YES) 
-: public Printable  // Inheriting from printable can allow you to print() a point.
-#endif 
-{
-  Point() : y{0}, x{0} {}
-  Point(uint8_t y, uint8_t x) : y{y}, x{x} {}
-  uint8_t y, x;
-  // Does this point equal another point.
-  bool operator==(const Point& other) const { return (other.y == y && other.x == x); }
-#if (DEBUG == YES)
-  size_t printTo(Print& p) const {
-    char rVal[9];
-    sprintf(rVal, "(%u,%u)", x, y);
-    return p.print(rVal);
-  }
-#endif
-};
-
-
-namespace Display {
-
-  constexpr uint8_t Width   { 128 };
-  constexpr uint8_t Height  { 64 };
-  
-  // Initialize the display.
-  Adafruit_SSD1306 display( Width, Height );  
-}
 
 
 // The pin numbers.
@@ -91,60 +67,244 @@ namespace Pin {
 }
 
 
+// All the directions you need.
+enum class Direction : uint8_t {
+  NONE, UP, DOWN, LEFT, RIGHT
+};
+
+
+// A point.
+struct Point
+#if (DEBUG == YES) 
+: public Printable  // Inheriting from printable can allow you to print() a point.
+#endif 
+{
+  Point() : y{0}, x{0} {}
+  Point(uint8_t y, uint8_t x) : y{y}, x{x} {}
+
+  // The coordinates
+  uint8_t y, x;
+
+  // Overide equality operator to compare points.
+  bool operator==(const Point& other) const { return (other.y == y && other.x == x); }
+
+#if (DEBUG == YES)
+  size_t printTo(Print& p) const {
+    char rVal[9];
+    sprintf(rVal, "(%u,%u)", x, y);
+    return p.print(rVal);
+  }
+#endif
+};
+
+
+namespace Display {
+
+  constexpr const uint8_t Width   { 128 };
+  constexpr const uint8_t Height  { 64 };
+  
+  // Initialize the display.
+  Adafruit_SSD1306 display( Width, Height );  
+}
+
+
 // The gameworld space.
 namespace World {
 
-  // How big you want things.
-  constexpr uint8_t Scale { 6 };
+  // How large in pixels do you want the game rows and columns to be.
+  constexpr const uint8_t Scale { 6 };
 
   // Offsets top left and right.
-  constexpr uint8_t xMinOffset { 4 };
-  constexpr uint8_t xMaxOffset { 2 };
-  constexpr uint8_t yMinOffset { 12 };
-  constexpr uint8_t yMaxOffset { 2 };
+  constexpr const uint8_t xMinOffset { 4 };
+  constexpr const uint8_t xMaxOffset { 2 };
+  constexpr const uint8_t yMinOffset { 12 };
+  constexpr const uint8_t yMaxOffset { 2 };
 
   // How big the world is.
-  constexpr uint8_t minX  { 0 };
-  constexpr uint8_t maxX  { (Display::Width - xMinOffset - xMaxOffset) / Scale };
-  constexpr uint8_t minY  { 0 };
-  constexpr uint8_t maxY  { (Display::Height - yMinOffset - yMaxOffset) / Scale };
+  constexpr const uint8_t minX  { 0 };
+  constexpr const uint8_t maxX  { (Display::Width - xMinOffset - xMaxOffset) / Scale };
+  constexpr const uint8_t minY  { 0 };
+  constexpr const uint8_t maxY  { (Display::Height - yMinOffset - yMaxOffset) / Scale };
+  
+  // Where the food is.
+  Point scranPos     { 0, 0 };
 
   // Get a random point.  This is a C++ lambda function.
   auto getRandomPoint { []() -> Point { 
     return { static_cast<uint8_t>( random(World::minY, World::maxY) ),
          static_cast<uint8_t>( random(World::minX, World::maxX) ) }; 
   }};
+
+  // Converts game coordinates to display coordinates.
+  auto toWorld { [](const Point& p) -> Point {
+    return { static_cast<uint8_t>((p.y * Scale) + yMinOffset), static_cast<uint8_t>((p.x * Scale) + xMinOffset) };
+  }};
 }
 
 
-// The snake.  The body value is the maximum size of the snake.
+/// Generic RingBuffer and Iterators for the snake.
+template <typename T, uint8_t Size> // This is a C++ class template.  Only used functions are instantiated.
+class RingBuffer {
+
+static_assert(Size < 255, "Buffer too big.  This only takes up to 254.\n");
+
+public:
+  struct ForwardIterator;
+  struct ReverseIterator;
+
+    RingBuffer();
+
+  // Forward iterator should iterate from the write pointer back.
+  ForwardIterator begin() noexcept;
+  ForwardIterator end() noexcept;
+
+    ReverseIterator rbegin() noexcept;
+  const ReverseIterator rbegin() const noexcept;
+    ReverseIterator rend() noexcept;
+  const ReverseIterator rend() const noexcept;
+
+    constexpr uint8_t size() const;
+  constexpr bool empty() const;
+  constexpr bool full() const;
+  constexpr uint8_t spaceRemaining() const;
+    constexpr uint8_t capacity() const;
+
+    T& front();
+    constexpr const T& front() const;
+    T& back();
+    constexpr const T& back() const;
+
+  bool push(T data);
+  T pop();
+  void clear();
+  
+private:
+  T data[Size + 1]; // write == read is empty so we need 1 more index.
+
+  // A ReverseIterator because forwards is reading from write back to read.
+    ReverseIterator write;
+  ReverseIterator read;
+};
+
+
+template <typename T, uint8_t Size>
+struct RingBuffer<T, Size>::ForwardIterator {
+
+  friend class RingBuffer<T, Size>;
+    
+    using self_type = RingBuffer<T, Size>::ForwardIterator;
+    using value_type = T;
+    using reference = T&;
+  using const_reference = const T&;
+    using pointer = T*;
+  using const_pointer = const T*;
+    using difference_type = ptrdiff_t;
+
+    ForwardIterator(pointer ptr, RingBuffer<T, Size>& buf);
+    
+    reference operator*();
+  constexpr const_reference operator*() const;
+  pointer operator->();
+  constexpr const_pointer operator->() const;
+    
+    // Unary operators
+    // prefix
+  self_type operator++();
+    self_type operator--();
+    // postfix
+  self_type operator++(int);
+    self_type operator--(int);
+
+    // Comparison operators
+    constexpr bool operator==(const self_type& other) const;
+    constexpr bool operator!=(const self_type& other) const;
+    constexpr bool operator<=(const self_type& other) const;
+    constexpr bool operator>=(const self_type& other) const;
+    
+    // Arithmetic operators
+  constexpr self_type operator-(const difference_type& distance) const;
+  constexpr self_type operator+(const difference_type& distance) const;
+
+    constexpr difference_type operator-(const self_type& other) const;
+
+private:
+    pointer ptr;
+  RingBuffer<T, Size>& buf;
+};
+
+
+template <typename T, uint8_t Size>
+struct RingBuffer<T, Size>::ReverseIterator {
+
+  friend class RingBuffer<T, Size>;
+    
+    using self_type = RingBuffer<T, Size>::ReverseIterator;
+    using value_type = T;
+    using reference = T&;
+  using const_reference = const T&;
+    using pointer = T*;
+  using const_pointer = const T*;
+    using difference_type = ptrdiff_t;
+
+    ReverseIterator(pointer ptr, RingBuffer<T, Size>& buf);
+    
+  reference operator*();
+  constexpr const_reference operator*() const;
+  pointer operator->();
+  constexpr const_pointer operator->() const;
+    
+    // Unary operators
+    // prefix
+  self_type operator++();
+  self_type operator--();
+    // postfix
+  self_type operator++(int);
+  self_type operator--(int);
+
+    // Comparison operators
+  constexpr bool operator==(const self_type& other) const;
+    constexpr bool operator!=(const self_type& other) const;
+    constexpr bool operator<=(const self_type& other) const;
+    constexpr bool operator>=(const self_type& other) const;
+    
+    // Arithmetic operators
+  constexpr self_type operator+(const difference_type& distance) const;
+  constexpr self_type operator-(const difference_type& distance) const;
+  constexpr difference_type operator-(const self_type& other) const;
+
+private:
+    pointer ptr;
+    RingBuffer<T, Size>& buf;
+};
+
+
+
+// The snake.
 //  There is not much RAM.  If you make this too big the game might crash.
-//  If you make it too small you will see what happens. 
+#if (DEBUG == YES)
+RingBuffer<Point, 35> snake;
+#else
+RingBuffer<Point, 72> snake; // This is the maximum length your snake can grow to.
+#endif
+
+
 namespace Snake {
 
-  Direction direction { Direction::NONE };
-#if (DEBUG == YES)
-  Point body[35];
-#else
-  Point body[110];
-#endif
-  Point head    { 0, 0 };
-  uint8_t size  { 1 };    // Snake size count. Limited to the size of the array
-                //  and 255 for the size of uint8_t.
+auto head = [](){ return snake.front(); };  // A lambda to return the head of the snake.
+Direction direction { Direction::NONE };  // The direction the snake is moving.
+
 }
 
-// Pressing the button sets this variable.
+// Pressing the button sets this variable.  It is volatile as it is updated from user input.
 volatile Direction lastDirectionPressed { Direction::NONE };
 
-// Food items.
-bool eatingScran   { false };
-Point scranPos     { 0, 0 };
 
-uint16_t playerScore { 0 };
+namespace Score {
 
-// Highscore is read from the EEPROM non-volatile memory.
-uint16_t highScore   { ((EEPROM.read(0) != 255) ? static_cast<uint16_t>(EEPROM.read(0) * 10) : 0) };
-
+  uint16_t current { 0 };
+  // Highscore is read from the EEPROM non-volatile memory.
+  uint16_t high    { ((EEPROM.read(0) != 255) ? static_cast<uint16_t>(EEPROM.read(0) * 10) : 0) };
+}
 
 
 // Define a button.
@@ -184,14 +344,13 @@ namespace Timing {
   constexpr uint16_t gameUpdateTimeOnReset_ms { 300 };
   unsigned long lastGameUpdatedTime { 0 };
 
-  constexpr uint8_t buttonReadTimeMillis { 3 };
-  constexpr uint8_t debounceCount { 3 };
-
+  constexpr uint8_t buttonReadTimeMillis { 1 };
+  constexpr uint8_t debounceCount { 4 };
 }
 
 
 
-// ----------------- Declarations ------------------
+// ------------ Function Declarations ------------
 
 /**
  * @brief Check if food eaten.
@@ -204,14 +363,14 @@ inline bool detectPlayerAteScran();
  * @brief Check if the player left the game area.
  * @return true if yes.
  */
-inline bool detectPlayerOutOfArea();
+inline bool detectPlayerOutOfArea(Point newHead);
 
 
 /**
  * @brief Check if the player collided with himself.
  * @return false 
  */
-inline bool detectSelfCollision();
+inline bool detectSelfCollision(Point newHead);
 
 
 /**
@@ -270,6 +429,11 @@ void updateGame();
 
 
 /**
+ * @brief Update the score.
+ */
+void drawUpdatedScore();
+
+/**
  * @brief Wait for a press at the start of the game.
  */
 void doSplashScreen();
@@ -323,9 +487,8 @@ void setup() {
     
   DEBUG_PRINTLN_FLASH("Setup Complete");
 
+    doSplashScreen();       // display the snake start up screen
   resetGameParameters();
-    doSplashScreen();     // display the snake start up screen
-    placeRandomScran();     // place first bit of food
 }
 
 
@@ -343,6 +506,7 @@ void loop() {
 
 // This is called by the timer interrupt.
 void readButtons() {
+
   using namespace Timing;
 
   for (auto& button : Buttons::All) {
@@ -353,13 +517,13 @@ void readButtons() {
       if (++button->pressedCount >= debounceCount / Timing::buttonReadTimeMillis) {
     
             if (button->state != Button::State::pressed) {
+          lastDirectionPressed = button->direction;
               button->state = Button::State::pressed;
           }
         }
     } else if (button->state == Button::State::pressed && (++button->unPressedCount >= debounceCount / Timing::buttonReadTimeMillis)) {
 
       button->state = Button::State::notPressed;
-      lastDirectionPressed = button->direction;
           button->pressedCount = 0;
       }
     }
@@ -371,11 +535,13 @@ void resetGameParameters() {
 
   lastDirectionPressed = Direction::NONE;
   Snake::direction = Direction::NONE;
-  Snake::size = 1;
-  Snake::head = World::getRandomPoint();
+  snake.clear();
+  Score::current = 0;
+  snake.push(World::getRandomPoint());
   Timing::gameUpdateTime_ms = Timing::gameUpdateTimeOnReset_ms;
-  scranPos = World::getRandomPoint();
-  playerScore = 0;
+  Display::display.clearDisplay();
+  drawDisplayBackground();  // Draw the whole display but only once.
+  placeRandomScran();
 }
 
 
@@ -393,11 +559,11 @@ void drawDisplayBackground() {
   // draw scores
   display.setCursor(2, 1);
   display.print(F("Score:"));
-  display.print(playerScore);
+  display.print(Score::current);
   
   display.setCursor((Width / 2) + 2, 1);  
   display.print(F("High:"));
-  display.print(highScore);
+  display.print(Score::high);
 
   // draw play area
   //      pos  1x, 1y, 2x, 2y, colour
@@ -417,74 +583,71 @@ void drawDisplayBackground() {
 void updateGame() {
     
   using namespace Display;
-  
-  #pragma message "Inefficient use pointer to head and tail."
-  // Move the body. 
-  for (uint8_t i { Snake::size }; i > 0; --i) {
-    Snake::body[i] = Snake::body[i - 1];
-  }
+  using namespace Snake;
 
-  eatingScran = detectPlayerAteScran();
-
-  // Add an extra pixel to the snake.
-  if (eatingScran) {
-    ++Snake::size;
-    Snake::body[Snake::size - 1] = Snake::head;
-  }
-
-  Snake::body[0] = Snake::head;
-  
-  if (lastDirectionPressed != Snake::direction) {
+  // Update the Snake's direction from button input.
+  if (lastDirectionPressed != direction) {
 
     switch (lastDirectionPressed) {
+
       case Direction::UP:
-        if (Snake::direction != Direction::DOWN)
-          Snake::direction = lastDirectionPressed;
+        if (direction != Direction::DOWN)
+          direction = lastDirectionPressed;
         break;
       case Direction::DOWN:
-        if (Snake::direction != Direction::UP)
-          Snake::direction = lastDirectionPressed;
+        if (direction != Direction::UP)
+          direction = lastDirectionPressed;
         break;
       case Direction::LEFT:
-        if (Snake::direction != Direction::RIGHT)
-          Snake::direction = lastDirectionPressed;
+        if (direction != Direction::RIGHT)
+          direction = lastDirectionPressed;
         break;
       case Direction::RIGHT:
-        if (Snake::direction != Direction::LEFT)
-          Snake::direction = lastDirectionPressed;
-        break;
+        if (direction != Direction::LEFT)
+          direction = lastDirectionPressed;
       default: break;
     }
   }
 
-  // Move the Snake.
-  switch(Snake::direction) { 
+  if (direction != Direction::NONE) {  // Nothing happens.
 
-    case Direction::UP:
-      --Snake::head.y;
-      break;
-    case Direction::DOWN:
-      ++Snake::head.y;
-      break;
-    case Direction::LEFT:
-      --Snake::head.x;
-      break;
-    case Direction::RIGHT:
-      ++Snake::head.x;
-      break;
-    default: break;
+    // Move the Snake.
+    // Save current head position.
+    auto currentHead = Snake::head();
+    Point newHead{};
+
+    switch (Snake::direction) { 
+
+      case Direction::UP:
+        newHead = {static_cast<uint8_t>(currentHead.y - 1), currentHead.x };
+        break;
+      case Direction::DOWN:
+        newHead = { static_cast<uint8_t>(currentHead.y + 1), currentHead.x };
+        break;
+      case Direction::LEFT:
+        newHead = { currentHead.y, static_cast<uint8_t>(currentHead.x - 1) };
+        break;
+      case Direction::RIGHT:
+        newHead = { currentHead.y, static_cast<uint8_t>(currentHead.x + 1) };
+        break;
+      default: break;
+    }
+
+    if (detectPlayerOutOfArea(newHead) || detectSelfCollision(newHead)) {
+      doGameOver();
+      return;
+    } else snake.push(newHead);
+
+    if (detectPlayerAteScran()) { // If eating tail stays put and only head advances.
+      drawUpdatedScore();
+    } else {
+      auto removed = snake.pop();
+      // best place to remove the tail.
+      display.fillRect((removed.x * World::Scale) + World::xMinOffset, (removed.y * World::Scale) + World::yMinOffset, World::Scale, World::Scale, BLACK);
+    }
   }
-
-  #pragma message "Redrawing everything is inefficient.  Should rewrite."
-
-  display.clearDisplay();
-  drawDisplayBackground();
-  drawScran();
   drawSnake();
   display.display();
-
-  if (detectPlayerOutOfArea() || detectSelfCollision())
-    doGameOver();
 }
 
 
@@ -555,44 +718,51 @@ void drawScran() {
 
 
 void drawSnake() {
-
+  // Only draws what is changed.
   auto& d = Display::display;
   using namespace World;
   using namespace Snake;
 
-  d.fillRect( ( body[0].x * Scale ) + xMinOffset,
-        ( body[0].y * Scale ) + yMinOffset,
-          Scale,
-          Scale,
-          WHITE
-        );
+  auto headPos = toWorld(Snake::head());
+  // draw the head.
+  d.fillRect( headPos.x, headPos.y, Scale, Scale, WHITE );
 
-  for (uint16_t i { 1 }; i < static_cast<uint16_t>(Snake::size - 1); ++i) {
-    
-    d.fillRect( ( body[i].x * Scale ) + 1 + xMinOffset,
-          ( body[i].y * Scale ) + 1 + yMinOffset,
-            Scale - 1,
-            Scale - 1,
-            WHITE  
-          );
+  // We don't want to draw all.  We want to draw the one after the head. and the last 2.
+  if (snake.size() == 1) return;
+  if (snake.size() > 1) {
+    auto tailPos = toWorld(snake.back());
+    d.fillRect( tailPos.x, tailPos.y, Scale, Scale, BLACK);
+    d.fillRect( tailPos.x + 3 , tailPos.y + 3, Scale - 3, Scale - 3, WHITE);
   }
+  if (snake.size() > 2) {
+    auto pos = toWorld(*(snake.end() - 2));
+    d.fillRect( pos.x, pos.y, Scale, Scale, BLACK);
+    d.fillRect( pos.x + 2, pos.y + 2, Scale - 2, Scale - 2, WHITE);
+  }
+  if (snake.size() > 3) {
+    auto pos = toWorld(*(snake.begin() + 1));
+    d.fillRect( pos.x, pos.y, Scale, Scale, BLACK);
+    d.fillRect( pos.x + 1, pos.y + 1, Scale - 1, Scale - 1, WHITE);
+  }
+}
 
-  d.fillRect( ( body[size - 1].x * Scale) + 2 + xMinOffset,
-        ( body[size - 1].y * Scale) + 2 + yMinOffset,
-          Scale - 2,
-          Scale - 2,
-          WHITE  
-        );
+void drawUpdatedScore() {
+  using namespace Display;
+  // draw scores
+  display.fillRect(36, 1, 27, 8, BLACK);
+  display.setCursor(38, 1);
+  display.print(Score::current);
 }
 
 
 void placeRandomScran() {
 
+  using namespace World;
+
 // This is a C++ lambda function.
   static auto isInSnake = [](Point& point)->bool {
-    for(int i = 0; i < Snake::size; ++i) {
-      if (point == Snake::body[i]) { 
-        DEBUG_PRINTLN_FLASH("In snake retry.");
+    for(auto& segment : snake) {
+      if (point == segment) { 
         return true; 
       };
     }
@@ -600,32 +770,43 @@ void placeRandomScran() {
   };
 
   do {
-    scranPos = World::getRandomPoint();
+    scranPos = getRandomPoint();
     DEBUG_PRINT_FLASH("scranpos: "); DEBUG_PRINTLN(scranPos);
   } while (isInSnake(scranPos));
+
+  // Draw scran here cause only want draw once.
+  drawScran();
 }
 
 
-
+//#pragma message "detect ate scran and related game updates should be separate."
 bool detectPlayerAteScran() {
     
-  if(Snake::head.x == scranPos.x && Snake::head.y == scranPos.y) {
-    playerScore += 10;
-    if (playerScore % 100 == 0) { Timing::gameUpdateTime_ms -= 35; }             
+  if (Snake::head() == World::scranPos) {
+
+    Score::current += 10;
+
+    if (Score::current % 100 == 0)  
+      Timing::gameUpdateTime_ms -= 30;             
+    
     tone(Pin::SOUND, 2000, 10);
-    drawDisplayBackground();
     placeRandomScran();
+
     return true;
   }
+
   return false;
 }
 
 
 
-bool detectSelfCollision() {
+bool detectSelfCollision(Point newHead) {
 
-  for (uint16_t i = 4; i < Snake::size; i++) {
-    if (Snake::head.x == Snake::body[i].x && Snake::head.y == Snake::body[i].y) {
+  //Serial.print(F("Head: ")); Serial.println(*Snake::head);
+
+  for (auto segment = snake.begin(); segment != snake.end(); ++segment) {
+    
+    if (newHead == *segment) {
 
       tone(Pin::SOUND, 2000, 20);
       tone(Pin::SOUND, 1000, 20);
@@ -638,13 +819,13 @@ bool detectSelfCollision() {
 
 
 
-bool detectPlayerOutOfArea() {
+bool detectPlayerOutOfArea(Point newHead) {
 
 #if (DEBUG == 1)
-    auto rVal = (( Snake::head.x >= World::maxX  ) || ( Snake::head.y >= World::maxY ));
+    auto rVal = (( newHead.x >= World::maxX  ) || ( newHead.y >= World::maxY ));
   if (rVal) {
     char pos[35];
-    sprintf(pos, "head pos: (%u, %u)", Snake::head.x / World::Scale, Snake::head.y / World::Scale);
+    sprintf(pos, "head pos: (%u, %u)", newHead.x / World::Scale, newHead.y / World::Scale);
     DEBUG_PRINTLN(pos);
     sprintf(pos, "World min/max: (%u, %u), (%u, %u)", World::minX, World::minY, World::maxX, World::maxY);
     DEBUG_PRINTLN(pos);
@@ -652,7 +833,7 @@ bool detectPlayerOutOfArea() {
   }
   return rVal;
 #else
-  return (( Snake::head.x >= World::maxX ) || ( Snake::head.y >= World::maxY ));
+  return (( newHead.x >= World::maxX ) || ( newHead.y >= World::maxY ));
 #endif
 }
 
@@ -669,17 +850,28 @@ void doGameOver() {
 
   for (uint8_t i = 0; i < 17; ++i) {
     if (!on) {
-      for (uint8_t i = 0; i < Snake::size; ++i) {
-        const auto& segment = Snake::body[i];
-        display.fillRect( ( segment.x * Scale ) + xMinOffset,
-                  ( segment.y * Scale ) + yMinOffset,
-                  Scale,
-                  Scale,
-                  BLACK
-        );
+      for (auto& segment : snake) {
+        auto pos = toWorld(segment);
+        display.fillRect(pos.x, pos.y, Scale, Scale, BLACK);
       }
     } else {
-      drawSnake();
+      auto head = toWorld(Snake::head());
+      display.fillRect(head.x, head.y, Scale, Scale, WHITE);
+      for (auto it = snake.begin() + 1; it != snake.end(); ++it) {
+        
+        auto pos = toWorld(*it);
+        
+        if (it == snake.end() - 2) {
+          display.fillRect(pos.x + 2, pos.y + 2, Scale - 2, Scale - 2, WHITE);
+
+        } else if (it == snake.end() - 1) {
+          display.fillRect(pos.x + 3, pos.y + 3, Scale - 3, Scale - 3, WHITE);
+
+        } else {
+          display.fillRect(pos.x + 1, pos.y + 1, Scale - 1, Scale - 1, WHITE);
+
+        }
+      }
     }
     display.display();
     on = !on;
@@ -700,9 +892,9 @@ void doGameOver() {
   tone(Pin::SOUND, 1000, 50);
     display.print(F("OVER"));
 
-  if (playerScore > highScore) {
-    highScore = playerScore;
-    EEPROM.write(0, highScore / 10);
+  if (Score::current > Score::high) {
+    Score::high = Score::current;
+    EEPROM.write(0, Score::high / 10);
   }
 
     for (uint8_t i = 0; i <= 16; ++i) { // this is to draw rectangles around game over
@@ -734,9 +926,9 @@ void doGameOver() {
     }
     
   display.clearDisplay();
-
+  lastDirectionPressed = Direction::NONE;
+  doSplashScreen();   // wait for player to start game
   resetGameParameters();
-  doSplashScreen();   // wait for player to start game    
 }
 
 
@@ -764,3 +956,342 @@ const __FlashStringHelper* directionToString(Direction d) {
   }
 }
 #endif
+
+
+
+
+// *** RingBuffer ***
+
+template<typename T, uint8_t Size>
+RingBuffer<T, Size>::RingBuffer() : write{data, *this}, read{data, *this} {}
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator
+RingBuffer<T, Size>::begin() noexcept {
+  return ForwardIterator{ &*(write - 1), *this };
+}
+  
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator RingBuffer<T, Size>::end() noexcept {
+  return ForwardIterator{ &*(read - 1), *this };
+}
+    
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator
+RingBuffer<T, Size>::rbegin() noexcept {
+  return read;
+}
+
+template<typename T, uint8_t Size>
+const typename RingBuffer<T, Size>::ReverseIterator
+RingBuffer<T, Size>::rbegin() const noexcept {
+  return read;
+}
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator
+RingBuffer<T, Size>::rend() noexcept {
+  return write; 
+}
+
+template<typename T, uint8_t Size>
+const typename RingBuffer<T, Size>::ReverseIterator
+RingBuffer<T, Size>::rend() const noexcept {
+  return write;
+}
+    
+
+template<typename T, uint8_t Size>
+constexpr uint8_t RingBuffer<T, Size>::size() const {
+  return ((write >= read) ? write - read : write - read + (Size + 1) );
+}
+
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::empty() const {
+    return (size() == 0);
+}
+
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::full() const {
+  return (write + 1 == read); 
+}
+
+template<typename T, uint8_t Size>
+constexpr uint8_t RingBuffer<T, Size>::spaceRemaining() const {
+  return capacity() - size(); 
+}
+
+template<typename T, uint8_t Size>
+constexpr uint8_t RingBuffer<T, Size>::capacity() const {
+  return Size; 
+}
+
+template<typename T, uint8_t Size>
+T& RingBuffer<T, Size>::front() {
+  assert(!empty() && "Empty");
+  return *begin(); 
+}
+
+template<typename T, uint8_t Size>
+constexpr const T& RingBuffer<T, Size>::front() const {
+  static_assert(!empty(), "empty");
+//  assert(!empty() && "Empty");
+  return *begin();
+}
+
+template<typename T, uint8_t Size>
+T& RingBuffer<T, Size>::back() {
+  assert(!empty() && "Empty");
+  return *read;  
+}
+
+template<typename T, uint8_t Size>
+constexpr const T& RingBuffer<T, Size>::back() const {
+  static_assert(!empty(), "empty");
+//  assert(!empty() && "Empty");
+  return *read; 
+}
+
+template<typename T, uint8_t Size>
+bool RingBuffer<T, Size>::push(T data) {
+  if (write + 1 == read)
+    return false;
+  *write++ = data;
+  return true; 
+}
+
+template<typename T, uint8_t Size>
+T RingBuffer<T, Size>::pop() {
+  assert(!empty() && "Cannot pop from empty buffer");
+  T rVal = *read; ++read;
+  return rVal;
+}
+
+template<typename T, uint8_t Size>
+void RingBuffer<T, Size>::clear() {
+  write.ptr = data;
+  read.ptr = data;
+}
+
+
+// *** Forward Iterator ***
+
+template<typename T, uint8_t Size>
+RingBuffer<T, Size>::ForwardIterator::ForwardIterator(pointer ptr, RingBuffer<T, Size>& buf) : ptr{ptr}, buf{buf} {}
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::reference
+RingBuffer<T, Size>::ForwardIterator::operator*() {
+  return *ptr; 
+}
+
+template<typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ForwardIterator::const_reference
+RingBuffer<T, Size>::ForwardIterator::operator*() const { 
+  return *ptr; 
+}
+
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::pointer
+RingBuffer<T, Size>::ForwardIterator::operator->() {
+  return ptr;
+}
+
+template<typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ForwardIterator::const_pointer
+RingBuffer<T, Size>::ForwardIterator::operator->() const {
+  return ptr;
+}
+
+
+// Unary operators
+// prefix
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator++() {
+  if (--ptr < buf.data) ptr = buf.data + Size;
+  return *this;
+}
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator--() {
+  if (++ptr == &buf.data[Size + 1]) ptr = buf.data;
+  return *this;
+}
+
+// postfix
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator++(int) {
+  self_type rVal = *this;
+  --(*this);
+  return rVal; 
+}
+
+template<typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator--(int) {
+  self_type rVal = *this;
+  ++(*this);
+  return rVal;
+}
+
+
+// Comparison operators
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ForwardIterator::operator==(const self_type& other) const {
+  return other.ptr == this->ptr;
+}
+
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ForwardIterator::operator!=(const self_type& other) const {
+  return other.ptr != this->ptr;
+}
+
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ForwardIterator::operator<=(const self_type& other) const {
+  return this->ptr >= other.ptr;
+}
+
+template<typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ForwardIterator::operator>=(const self_type& other) const {
+  return this->ptr <= other.ptr;
+}
+
+
+// Arithmetic operators
+template<typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator-(const difference_type& distance) const {
+  return self_type(buf.data + ((ptr - buf.data + distance) % (Size + 1)), buf);
+}
+
+template<typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ForwardIterator::self_type
+RingBuffer<T, Size>::ForwardIterator::operator+(const difference_type& distance) const {
+  auto indexOfResult = ((ptr - buf.data) + ((Size + 1) - distance)) % (Size + 1);
+  return self_type(buf.data + indexOfResult, buf);
+}
+
+template<typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ForwardIterator::difference_type
+RingBuffer<T, Size>::ForwardIterator::operator-(const self_type& other) const {
+  //return this->ptr - other->ptr;
+  return (reinterpret_cast<intptr_t>(this->ptr) - reinterpret_cast<intptr_t>(other.ptr)) / sizeof(value_type);
+}
+
+
+
+
+// *** Reverse Iterator ***
+
+template <typename T, uint8_t Size>
+RingBuffer<T, Size>::ReverseIterator::ReverseIterator(pointer ptr, RingBuffer<T, Size>& buf) : ptr{ptr}, buf{buf} {}
+
+
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::reference
+RingBuffer<T, Size>::ReverseIterator::operator*() {
+  return *ptr;
+}
+
+template <typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ReverseIterator::const_reference
+RingBuffer<T, Size>::ReverseIterator::operator*() const {
+  return *ptr;
+}
+
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::pointer
+RingBuffer<T, Size>::ReverseIterator::operator->() {
+  return ptr;
+}
+
+template <typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ReverseIterator::const_pointer
+RingBuffer<T, Size>::ReverseIterator::operator->() const {
+  return ptr;
+}
+
+
+// Unary operators
+// prefix
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator++() {
+  if (++ptr == &buf.data[Size + 1]) 
+    ptr = buf.data;
+  return *this;
+}
+
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator--() {
+  if (--ptr < buf.data)
+    ptr = buf.data + Size;
+  return *this;
+}
+
+// postfix
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator++(int) {
+  self_type rVal = *this; ++(*this);
+  return rVal;
+}
+
+template <typename T, uint8_t Size>
+typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator--(int) {
+  self_type rVal = *this;
+  --(*this);
+  return rVal;
+}
+
+
+// Comparison operators
+template <typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ReverseIterator::operator==(const self_type& other) const {
+  return this->ptr == other.ptr;
+}
+
+template <typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ReverseIterator::operator!=(const self_type& other) const {
+  return this->ptr != other.ptr;
+}
+
+template <typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ReverseIterator::operator<=(const self_type& other) const {
+  return this->ptr <= other.ptr;
+}
+
+template <typename T, uint8_t Size>
+constexpr bool RingBuffer<T, Size>::ReverseIterator::operator>=(const self_type& other) const {
+  return this->ptr >= other.ptr;
+}
+
+
+// Arithmetic operators
+template <typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator+(const difference_type& distance) const {
+  return self_type(buf.data + ((ptr - buf.data + distance) % (Size + 1)), buf);
+}
+
+template <typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ReverseIterator::self_type
+RingBuffer<T, Size>::ReverseIterator::operator-(const difference_type& distance) const {
+  auto indexOfResult = ((ptr - buf.data) + ((Size + 1) - distance)) % (Size + 1);
+  return self_type(buf.data + indexOfResult, buf);
+}
+
+template <typename T, uint8_t Size>
+constexpr typename RingBuffer<T, Size>::ReverseIterator::difference_type
+RingBuffer<T, Size>::ReverseIterator::operator-(const self_type& other) const {
+  //return this->ptr - other->ptr;
+  return (reinterpret_cast<intptr_t>(this->ptr) - reinterpret_cast<intptr_t>(other.ptr)) / sizeof(value_type);
+}
+
+
