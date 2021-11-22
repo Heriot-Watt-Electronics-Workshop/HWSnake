@@ -1,11 +1,9 @@
 // HWSnake game for 1st Year PRAXIS course @
 // Heriot Watt University, Edinburgh. Scotland
 // Build your own Arduino and OLED display shield.
-// Code by Will W from The EPS Electronics Workshop.
+// Code by Will W from the EPS Electronics Workshop.
 // Version 1.0
 // 20th November 2021
-
-// Feel free to modify and improve the code.
 
 // Dependencies are the SSD1306 library from Adafruit.
 // and 'TimerInterrupt' by Khoi Hoang.
@@ -344,8 +342,8 @@ namespace Timing {
   constexpr uint16_t gameUpdateTimeOnReset_ms { 300 };
   unsigned long lastGameUpdatedTime { 0 };
 
-  constexpr uint8_t buttonReadTimeMillis { 1 };
-  constexpr uint8_t debounceCount { 4 };
+  constexpr uint8_t buttonReadTimeMillis { 2 };
+  constexpr uint8_t debounceCount { 3 };
 }
 
 
@@ -459,7 +457,6 @@ void setup() {
   delay(Timing::gameUpdateTime_ms);
 
   ITimer1.init();
-
   if (ITimer1.attachInterruptInterval(Timing::buttonReadTimeMillis, readButtons)) {
     DEBUG_PRINTLN_FLASH("Timer attached successfully.");
   }
@@ -804,7 +801,7 @@ bool detectSelfCollision(Point newHead) {
 
   //Serial.print(F("Head: ")); Serial.println(*Snake::head);
 
-  for (auto segment = snake.begin(); segment != snake.end(); ++segment) {
+  for (auto segment = snake.begin(); segment != snake.end() - 1; ++segment) {
     
     if (newHead == *segment) {
 
