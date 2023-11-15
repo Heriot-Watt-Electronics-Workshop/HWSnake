@@ -1,7 +1,7 @@
 // HWSnake game for 1st Year PRAXIS course @
 // Heriot Watt University, Edinburgh. Scotland
 // Build your own Arduino and OLED display shield.
-// Coded by Will W from the EPS Electronics Workshop with bytes, nibbles and crumbs.
+// Coded by Will W from the EPS Electronics Workshop with too much abstraction
 // and too much C++, mostly for his own entertainment.
 // Version 2.0 was created in April 2023
 // The snake should now grow to fill the entire screen if you are good enough.
@@ -12,35 +12,84 @@
 // These can be installed from 'Tools/Manage Libraries' in the menubar above if
 // in the Arduino IDE or from the Platformio library manager if using vscode.
 
+// All files combined into one for ease of use for students.
 
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>			// To save hi-score.
-// Timer Interrupt for button debounce
+// Timer Interrupt for button debounce.
 #define USE_TIMER_1 true
 #include "TimerInterrupt.h"
 
 
-// Geometry Header Section.  Main globals are declared afterwards.
-// Containing definition of Point and it's alias Size.
-// 	as well as Rectangle.
+// Defined for readability.
+#define YES 1
+#define NO 0
 
-namespace Utility {
+// This switches on or off serial debug output.
+#define DEBUG NO // or NO
+#define LIVE_ERRORS NO
 
-// A utility to tell if an integer type is signed or unsigned at runtime or compile time.
-template <typename T>
-struct is_signed {
-	static constexpr bool value { (T(-1) < T(0)) }; 
-};
+// Write yes to remove the high score.
+#define CLEAR_HIGH_SCORE NO
 
-template <typename T>
-struct is_unsigned {
-	static constexpr bool value { (T(-1) > T(0)) };
-};
+// This determines the size of the array used to store the snake.  The
+// snake may be 4 times this size + 1 for the head.  Maximum if all spaces 
+// were in the snake would be 160 sections so 40 bytes of data should be enough.
+#if (DEBUG == YES)
+constexpr uint8_t SNAKE_DATA_SIZE { 4 };
+#elif (DEBUG == NO)
+constexpr uint8_t SNAKE_DATA_SIZE { 40 };
+#endif
 
+
+// If you want sound. U will need a buzzer.
+#define SOUND NO
+#if (SOUND == 0)
+	#define tone(x, y, z)
+#endif
+
+
+// This makes all debugging print statements disappear when DEBUG set to NO.
+#if (DEBUG == YES)
+	#include "string.h"
+	#define DEBUG_PRINT_FLASH(x) 	Serial.print(F(x))
+	#define DEBUG_PRINTLN_FLASH(x) 	Serial.println(F(x))
+	#define DEBUG_PRINT(x) 			Serial.print(x)
+	#define DEBUG_PRINTLN(x) 		Serial.println(x)
+	#define DEBUG_PRINT_HEX(x) 		Serial.print(x, HEX)
+	#define DEBUG_PRINTLN_HEX(x) 	Serial.println(x, HEX)
+#else
+	#define DEBUG_PRINT_FLASH(x)
+	#define DEBUG_PRINTLN_FLASH(x)
+	#define DEBUG_PRINT(x)
+	#define DEBUG_PRINTLN(x)
+	#define DEBUG_PRINT_HEX(x)
+	#define DEBUG_PRINTLN_HEX(x)
+#endif // DEBUG
+
+
+
+// The pin numbers.
+namespace Pin {
+
+	constexpr uint8_t UP 	{ 7 };
+	constexpr uint8_t DOWN 	{ 8 };
+	constexpr uint8_t LEFT 	{ 4 };
+	constexpr uint8_t RIGHT { 2 };
+	constexpr uint8_t MIDDLE{ 3 };
+
+#if (SOUND == YES)
+	constexpr uint8_t SOUND { 9 };
+#endif
 }
 
+
+
+// Geometry Header
+// Header only library containing definition of Point and it's alias Size.
+// 	as well as Rectangle.
 
 // A point
 // Templated to allow for changing the stored data type easily throughout the whole
@@ -51,18 +100,20 @@ struct Point
 : public Printable	// Inheriting from printable can allow you to print() a point.
 #endif 
 {
-	constexpr Point() : y{0}, x{0} {}
-	constexpr Point(T y, T x) : y{y}, x{x} {}
+	// The Coordinates
+	T y, x;
+
+  // Constructors.
+	Point() : y{0}, x{0} {}
+	Point(T y, T x) : y{y}, x{x} {}
 
 	template <typename OtherPointDataType>
-	constexpr Point(const Point<OtherPointDataType>& other) : y{other.y}, x{other.x}  {}
+	Point(const Point<OtherPointDataType>& other) : y{other.y}, x{other.x}  {}
 
-	// The Coordinates
-	T y, x; 
 
 	// Override equality operator to compare points.
-	constexpr bool operator==(const Point& other) const { return (other.y == y && other.x == x); }
-	constexpr bool operator!=(const Point& other) const { return !(*this == other); }
+	bool operator==(const Point& other) const { return (other.y == y && other.x == x); }
+	bool operator!=(const Point& other) const { return !(*this == other); }
 	// Override addition assignment operator to add and assign.
 	void operator+=(const Point& other) { y += other.y; x += other.x; }
 	void operator-=(const Point& other) { y -= other.y; x -= other.x; }
@@ -81,7 +132,7 @@ size_t printTo(Print& p) const {
 };
 
 
-template <typename T> using Size = Point<T>;
+//template <typename T> using Size = Point<T>;
 
 template <typename PointT, typename DataT = decltype(PointT::x)>
 struct Rectangle 
@@ -89,7 +140,7 @@ struct Rectangle
 : public Printable
 #endif
 {
-	using SizeT = Size<DataT>;
+	using SizeT = PointT;
 private:
 // Origin is tl
 	PointT mOrigin;
@@ -97,7 +148,7 @@ private:
 public:
 	Rectangle() : mOrigin{PointT{0,0}}, mSize{PointT{0,0}} {}
 	Rectangle(DataT y, DataT x, DataT height, DataT width) : mOrigin{y, x}, mSize{height, width} {}
-	Rectangle(const PointT& tl, const PointT& tr, const PointT& bl, const PointT& br) : mOrigin{tl.y, tl.x}, mSize{ bl.y - tl.y, tr.x - tl.x } {} 
+	Rectangle(const PointT& tl, const PointT& tr, const PointT& bl, const PointT& br) : mOrigin{ tl.y, tl.x }, mSize{ bl.y - tl.y, tr.x - tl.x } {} 
 	Rectangle(const PointT& origin, const SizeT& size) : mOrigin{origin}, mSize{size} {}
 	Rectangle(const SizeT& size) : mOrigin{0, 0}, mSize{ size } {}
 
@@ -107,12 +158,12 @@ public:
 		this->mSize = other.size();
 	}
 
-	constexpr PointT tl() const { return mOrigin; }
-	constexpr PointT bl() const { return { mOrigin.y + mSize.y, mOrigin.x }; }
-	constexpr PointT tr() const { return { mOrigin.y, mOrigin.x + mSize.x }; }
-	constexpr PointT br() const { return { static_cast<DataT>(mOrigin.y + mSize.y), static_cast<DataT>(mOrigin.x + mSize.x) }; }
-	constexpr PointT origin() const { return mOrigin; }
-	constexpr PointT centre() const { 
+	PointT tl() const { return mOrigin; }
+	PointT bl() const { return { mOrigin.y + mSize.y, mOrigin.x }; }
+	PointT tr() const { return { mOrigin.y, mOrigin.x + mSize.x }; }
+	PointT br() const { return { static_cast<DataT>(mOrigin.y + mSize.y), static_cast<DataT>(mOrigin.x + mSize.x) }; }
+	PointT origin() const { return mOrigin; }
+	PointT centre() const { 
 		return { 	static_cast<DataT>(mOrigin.y + (mSize.y / 2)),
 		 			static_cast<DataT>(mOrigin.x + (mSize.x / 2)) 
 		};
@@ -165,101 +216,39 @@ public:
 };
 
 
-// END OF GEOMETRY SECTION
+namespace Utility {
 
+// A utility to tell if an integer type is signed or unsigned at runtime or compile time.
+template <typename T>
+struct is_signed {
+	static constexpr bool value { (T(-1) < T(0)) }; 
+};
 
-// GLOBALS SECTION
+template <typename T>
+struct is_unsigned {
+	static constexpr bool value { (T(-1) > T(0)) };
+};
 
-// Defined for readability.
-#define YES 1
-#define NO 0
-
-// This switches on or off serial debug output.
-#define DEBUG NO // or NO
-#define LIVE_ERRORS NO
-
-// Write yes to remove the high score.
-#define CLEAR_HIGH_SCORE NO
-
-// This determines the size of the array used to store the snake.  The
-// snake may be 4 times this size + 1 for the head.  Maximum if all spaces 
-// were in the snake would be 160 sections so 40 bytes of data should be enough.
-#if (DEBUG == YES)
-constexpr uint8_t SNAKE_DATA_SIZE { 4 };
-#elif (DEBUG == NO)
-constexpr uint8_t SNAKE_DATA_SIZE { 40 };
-#endif
+}
 
 
 
 // Store Points as a pair of this type.
 // int8_t will give a range of -127 to +128.
 // uint8_t will give a range of 0 to 255.
+// The data type used throughout.
 using POINT_DATA_TYPE = uint8_t;
 using PointType = Point<POINT_DATA_TYPE>;
 using SizeType = PointType;
 using Rect = Rectangle<PointType>;
 
 
-// If you want sound. U will need a buzzer.
-#define SOUND NO
-#if (SOUND == 0)
-	#define tone(x, y, z)
-#endif
 
 
-// This makes all debugging print statements disappear when DEBUG set to NO.
-#if (DEBUG == YES)
-	#include "string.h"
-	#define DEBUG_PRINT_FLASH(x) 	Serial.print(F(x))
-	#define DEBUG_PRINTLN_FLASH(x) 	Serial.println(F(x))
-	#define DEBUG_PRINT(x) 			Serial.print(x)
-	#define DEBUG_PRINTLN(x) 		Serial.println(x)
-	#define DEBUG_PRINT_HEX(x) 		Serial.print(x, HEX)
-	#define DEBUG_PRINTLN_HEX(x) 	Serial.println(x, HEX)
-#else
-	#define DEBUG_PRINT_FLASH(x)
-	#define DEBUG_PRINTLN_FLASH(x)
-	#define DEBUG_PRINT(x)
-	#define DEBUG_PRINTLN(x)
-	#define DEBUG_PRINT_HEX(x)
-	#define DEBUG_PRINTLN_HEX(x)
-#endif // DEBUG
-
-
-namespace Utility {
-
-// #if (DEBUG == YES)
-// // This class allows to print any integer type in binary format.
-// //  It is here to aid in debugging. 
-// template<typename T>
-// struct Binary : public Printable {
-//     T value;
-// 	constexpr Binary(T value) : value{value} { } 
-// 	size_t printTo(Print& p) const;
-// };
-// #endif // (DEBUG == YES)
-
-}
-
-
-// The pin numbers.
-namespace Pin {
-
-	constexpr uint8_t UP 	{ 7 };
-	constexpr uint8_t DOWN 	{ 8 };
-	constexpr uint8_t LEFT 	{ 4 };
-	constexpr uint8_t RIGHT { 2 };
-	constexpr uint8_t MIDDLE{ 3 };
-
-#if (SOUND == YES)
-	constexpr uint8_t SOUND { 9 };
-#endif
-}
 
 namespace Display {
-	constexpr uint8_t Address 	{ 0x3C };
-	const Rect dspRect {{64, 128}};
+	constexpr uint8_t Address { 0x3C };
+	const Rect dspRect { {64, 128} };
 }
 
 
@@ -275,11 +264,11 @@ namespace World {
 	constexpr uint8_t yMaxOffset { 2 };
 
 	// How big the world is.
-	const Rect World {
+	Rect World {
 			0,																	// minY
 			0,																	// minX
-			static_cast<POINT_DATA_TYPE>((Display::dspRect.height() - yMinOffset - yMaxOffset) / Scale),		// maxY
-			static_cast<POINT_DATA_TYPE>((Display::dspRect.width() - xMinOffset - xMaxOffset) / Scale)  		// maxX
+			(Display::dspRect.height() - yMinOffset - yMaxOffset) / Scale,		// maxY
+			(Display::dspRect.width() - xMinOffset - xMaxOffset) / Scale 		// maxX
 	};
 }
 
@@ -298,6 +287,54 @@ Direction operator~(const Direction direction);
 // #if (DEBUG == YES)
 // String DirectionAsString(const Direction d);
 // #endif // (DEBUG == YES)
+
+
+
+// namespace Error {
+
+// Adafruit_SSD1306* displayPtr = nullptr;
+
+// void initErrors(Adafruit_SSD1306& display) {
+// 	displayPtr = &display;
+// }
+
+// void displayError(int16_t line, const char* file, const char* msg) {
+
+// 	if (displayPtr == nullptr) return;
+	
+// 	auto& d = *displayPtr;
+
+// 	d.clearDisplay();
+// 	d.setTextColor(WHITE);
+// 	d.setCursor(0, 0);
+// 	d.setTextSize(1);
+// 	d.println("ERROR");
+// 	d.println("Line: ");
+// 	d.println(line);
+// 	d.println("File: ");
+// 	d.println(file);
+// 	d.println(msg);
+// 	d.display();
+// 	delay(10000);
+// }
+// }
+
+
+// Optional wrapper for a point. ie it may or may not contain data.
+template <typename DATA_TYPE>
+struct OptionalPoint : protected Point<DATA_TYPE> {
+private:
+	const bool mHasValue { true };
+public:
+	OptionalPoint(const DATA_TYPE y, const DATA_TYPE x) :Point<DATA_TYPE>{y, x} { }
+	OptionalPoint(const Point<DATA_TYPE>& p) : Point<DATA_TYPE>{p} { }
+	OptionalPoint() : mHasValue{ false } { }
+	bool hasValue() const { return hasValue; }
+	bool isEmpty() const { return !hasValue; }
+	const Point<DATA_TYPE> getValue() const { return {this->y, this->x}; }
+	operator bool() { return mHasValue; }
+};
+
 
 
 // Template function definitions are defined in the header.
@@ -325,40 +362,6 @@ namespace Utility {
 // }
 // #endif // (DEBUG == YES)
 }
-
-// END OF GLOBALS SECTION
-
-// Error Section
-namespace Error {
-
-//Adafruit_SSD1306* displayPtr;
-void initErrors(Adafruit_SSD1306& display);
-void displayError(int16_t line, const char* file, const char* msg);
-//void displayError(int16_t line, const char* file, const __FlashStringHelper* msg);
-
-}
-
-// End of error section.
-
-
-
-// Optional wrapper for a point. ie it may or may not contain data.
-template <typename DATA_TYPE>
-struct OptionalPoint : protected Point<DATA_TYPE> {
-private:
-	const bool mHasValue { true };
-public:
-	OptionalPoint(const DATA_TYPE y, const DATA_TYPE x) :Point<DATA_TYPE>{y, x} { }
-	OptionalPoint(const Point<DATA_TYPE>& p) : Point<DATA_TYPE>{p} { }
-	OptionalPoint() : mHasValue{ false } { }
-	bool hasValue() const { return hasValue; }
-	bool isEmpty() const { return !hasValue; }
-	const Point<DATA_TYPE> getValue() const { return {this->y, this->x}; }
-	operator bool() { return mHasValue; }
-};
-
-
-
 
 
 // A crumb is half of a nibble which is half of a byte so it is essentially 2-bits.
@@ -397,7 +400,6 @@ struct CrumbPtr
 	size_t printTo(Print& p) const;
 #endif
 };
-
 
 
 //    ---- memory ----
@@ -529,7 +531,7 @@ const POINT_TYPE Snake<SNAKE_DATA_SIZE, POINT_TYPE>::operator[](size_t index) co
 	
 	// Print an error.
 	if (index + 1 > m_length) { 
-		Error::displayError(__LINE__, __FILE__, "Out of range access.");
+#pragma warning "uncomment"		//Error::displayError(__LINE__, __FILE__, "Out of range access.");
 		return {0, 0}; 
 	}
 	if (index == 0) { return m_head; };
@@ -636,7 +638,8 @@ size_t Snake<SNAKE_DATA_SIZE, POINT_TYPE>::printTo(Print& p) const {
 #endif
 
 
-// END OF SNAKE SECTION
+
+
 
 
 
@@ -736,6 +739,19 @@ namespace Game {
 	};
 	volatile State state{ State::EntrySplash }; 
 }
+
+
+
+namespace Error {
+
+//Adafruit_SSD1306* displayPtr;
+void initErrors(Adafruit_SSD1306& display);
+void displayError(int16_t line, const char* file, const char* msg);
+//void displayError(int16_t line, const char* file, const __FlashStringHelper* msg);
+
+}
+
+
 
 
 
@@ -945,6 +961,9 @@ void setup() {
 	DEBUG_PRINTLN(__VERSION__);
 	DEBUG_PRINT_FLASH("C++ Version: ");
 	DEBUG_PRINTLN(__cplusplus);
+	
+	pinMode(5, OUTPUT);
+	pinMode(6, OUTPUT);
 
     doSplashScreen();    		// display the snake start up screen
 }
@@ -965,7 +984,7 @@ void loop() {
 		if 		(Game::state == Game::State::Running) 	updateGame();
 		else if (Game::state == Game::State::Paused) 	doPaused();
 		else if (Game::state == Game::State::Error) { 
-			Error::displayError(__LINE__, __FILE__, "In Error State");
+			#pragma warning "uncomment" // Error::displayError(__LINE__, __FILE__, "In Error State");
 			DEBUG_PRINT_FLASH("Error");
 		}
 
@@ -1012,10 +1031,12 @@ void readButton(Button const* button) {
 // This is called by the timer interrupt.
 void readButtons() {
 
+	digitalWrite(6, HIGH);
+
 	using namespace Timing;
 	using namespace Game;
 
-	for (auto& button : Buttons::All) readButton(button);
+	for (auto const& button : Buttons::All) readButton(button);
 
 	// We set paused here so that it happens quickly.
 	if (lastDirectionPressed == Direction::MIDDLE && state == State::Running) {
@@ -1036,6 +1057,8 @@ void readButtons() {
 	// 	default:
 	// 		state = Game::State::Error; // Unhandled game state.
 	// }
+
+	digitalWrite(6, LOW);
 }
 
 
@@ -1385,10 +1408,10 @@ void doGameOver() {
 	bool on { false };
 	uint8_t dly { 60 };
 
-	for (uint8_t i { 0 }; i < 17; ++i) {
+	for (uint8_t i{}; i < 17; ++i) {
 		if (!on) 
-			for (uint16_t i { 0 }; i < snake.length(); ++i) {
-				auto pos = toWorld(snake[i]);
+			for (uint16_t j{}; j < snake.length(); ++j) {
+				auto pos = toWorld(snake[j]);
 				display.fillRect(pos.x, pos.y, Scale, Scale, BLACK);
 			}
 		else 
@@ -1413,7 +1436,7 @@ void doGameOver() {
 
 	uint8_t rectX1 { 38 }, rectY1 { 28 }, rectX2 { 58 }, rectY2 { 12 };
 
-    for (uint8_t i = 0; i <= 16; ++i) { // this is to draw rectangles around game over
+    for (uint8_t i{}; i <= 16; ++i) { // this is to draw rectangles around game over
 
 		display.drawRect(rectX1, rectY1, rectX2, rectY2, WHITE);
 		display.display();
@@ -1532,7 +1555,7 @@ void doHighScore() {
 
 
 		Rect rInner{};
-		Rect rOuter {{static_cast<POINT_DATA_TYPE>(dspRect.height() >> 1), static_cast<POINT_DATA_TYPE>(dspRect.width() >> 1)}};
+		Rect rOuter {{dspRect.height() >> 1, dspRect.width() >> 1}};
 
 		for (uint8_t i{0}; rOuter.width() <= dspRect.width(); ++i) {
 
@@ -1619,7 +1642,7 @@ const __FlashStringHelper* stateAsString(Game::State s) {
 
 
 
-// CrumbPtr
+
 Direction CrumbPtr::getValue() { 
 	return static_cast<Direction>((*ptr >> ((3 - crumb) << 1)) & 0x03);
 }
@@ -1637,6 +1660,7 @@ bool CrumbPtr::operator==(const CrumbPtr& other) const {
 bool CrumbPtr::operator!=(const CrumbPtr& other) const {
 	return !(*this == other);
 }  
+
 
 // Prefix
 CrumbPtr::selfType& CrumbPtr::operator++() { 
@@ -1676,39 +1700,6 @@ size_t CrumbPtr::printTo(Print& p) const {
 #endif // (DEBUG == YES)
 
 
-
-// Couple of error definitions.
-namespace Error {
-
-Adafruit_SSD1306* displayPtr = nullptr;
-
-void initErrors(Adafruit_SSD1306& display) {
-	displayPtr = &display;
-}
-
-void displayError(int16_t line, const char* file, const char* msg) {
-
-	if (displayPtr == nullptr) return;
-	
-	auto& d = *displayPtr;
-
-	d.clearDisplay();
-	d.setTextColor(WHITE);
-	d.setCursor(0, 0);
-	d.setTextSize(1);
-	d.println("ERROR");
-	d.println("Line: ");
-	d.println(line);
-	d.println("File: ");
-	d.println(file);
-	d.println(msg);
-	d.display();
-	delay(10000);
-}
-}
-
-
-
 Direction operator~(const Direction direction) {
 	// Return inverted if in range 0-3;
 	if (static_cast<uint8_t>(direction) > 0x03) return static_cast<Direction>(0x4);
@@ -1728,5 +1719,18 @@ Direction operator~(const Direction direction) {
 // 	}
 // }
 //#endif // (DEBUG == YES)
+
+//namespace Utility {
+// #if (DEBUG == YES)
+// // This class allows to print any integer type in binary format.
+// //  It is here to aid in debugging. 
+// template<typename T>
+// struct Binary : public Printable {
+//     T value;
+// 	constexpr Binary(T value) : value{value} { } 
+// 	size_t printTo(Print& p) const;
+// };
+// #endif // (DEBUG == YES)
+//}
 
 
